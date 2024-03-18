@@ -99,6 +99,48 @@ where
     )
 }
 
+pub fn encrypt_write_stream_with_capacity<R: AsyncRead, W: AsyncWrite, A, S>(
+    write: W,
+    read: R,
+    key: &GenericArray<u8, A::KeySize>,
+    nonce: &GenericArray<u8, NonceSize<A, S>>,
+    buffer_size: usize,
+    chunk_size: usize,
+) -> (WriteHalf<W, Encryptor<A, S>>, R)
+where
+    S: StreamPrimitive<A> + NewStream<A>,
+    A: chacha20poly1305::AeadInPlace + chacha20poly1305::KeyInit,
+    A::NonceSize: Sub<<S as StreamPrimitive<A>>::NonceOverhead>,
+    NonceSize<A, S>: ArrayLength<u8>,
+{
+    let encryptor = Encryptor::new(key, nonce);
+    (
+        WriteHalf::with_capacity(write, encryptor, buffer_size, chunk_size),
+        read,
+    )
+}
+
+pub fn encrypt_read_stream_with_capacity<R: AsyncRead, W: AsyncWrite, A, S>(
+    write: W,
+    read: R,
+    key: &GenericArray<u8, A::KeySize>,
+    nonce: &GenericArray<u8, NonceSize<A, S>>,
+    buffer_size: usize,
+) -> (W, ReadHalf<R, Decryptor<A, S>>)
+where
+    S: StreamPrimitive<A> + NewStream<A>,
+    A: chacha20poly1305::AeadInPlace + chacha20poly1305::KeyInit,
+    A::NonceSize: Sub<<S as StreamPrimitive<A>>::NonceOverhead>,
+    NonceSize<A, S>: ArrayLength<u8>,
+{
+    let decryptor = Decryptor::new(key, nonce);
+    (
+        write,
+        ReadHalf::with_capacity(read, decryptor, buffer_size)
+    )   
+}
+
+
 #[cfg(test)]
 fn get_key<const S: usize>(plain_key: &str, salt: &str) -> [u8; S] {
     const ITERATIONS: u32 = 4096;

@@ -24,7 +24,7 @@ pin_project_lite::pin_project! {
     /// inner writter. Under "normal" circunstances, the internal buffer will be seldom used.
     pub struct WriteHalf<T, U> {
         #[pin]
-        inner: T,
+        pub inner: T,
         encryptor: U,
         buffer: bytes::BytesMut,
         chunk_size: usize

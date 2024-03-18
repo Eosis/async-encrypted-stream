@@ -17,7 +17,7 @@ pin_project! {
     pub struct ReadHalf<T, U> {
 
         #[pin]
-        inner: T,
+        pub inner: T,
         decryptor: U,
         buffer: Vec<u8>,
         pos: usize,
