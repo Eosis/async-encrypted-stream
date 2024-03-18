@@ -10,18 +10,19 @@ use std::{ops::Sub, pin::Pin, task::ready};
 
 use tokio::io::{AsyncBufRead, AsyncRead};
 
-use crate::DEFAULT_BUFFER_SIZE;
+use crate::{DEFAULT_BUFFER_SIZE, DEFAULT_CHUNK_SIZE};
 
 pin_project! {
     /// Async Encryption Read Half
     pub struct ReadHalf<T, U> {
 
         #[pin]
-        inner: T,
+        pub inner: T,
         decryptor: U,
         buffer: Vec<u8>,
         pos: usize,
-        cap: usize
+        cap: usize,
+        output_buffer: Vec<u8>
     }
 }
 
@@ -42,6 +43,7 @@ where
             buffer: vec![0u8; size],
             pos: 0,
             cap: 0,
+            output_buffer: Vec::with_capacity(DEFAULT_CHUNK_SIZE),
         }
     }
 
@@ -136,15 +138,35 @@ where
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         loop {
+            if !self.output_buffer.is_empty() && buf.remaining() > 0 {
+                let this = self.as_mut().project();
+                let to_take = std::cmp::min(this.output_buffer.len(), buf.remaining());
+                let drain = this.output_buffer.drain(0..to_take);
+                buf.put_slice(drain.as_slice());
+                
+                // Return Early if the buf was populated from our output buffer.
+                return std::task::Poll::Ready(Ok(())); 
+            }
+
             if let Some(decrypted) = self.as_mut().produce()? {
-                if decrypted.len() > buf.remaining() {
+                
+                let remaining_output_buffer_capacity = {
+                    let this = self.as_ref();
+                    this.output_buffer.capacity()
+                };
+
+                let this = self.as_mut().project();
+                if decrypted.len() > buf.remaining() + remaining_output_buffer_capacity {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::OutOfMemory,
                         "Decrypted value exceeds buffer capacity",
                     ))?;
                 }
-
-                buf.put_slice(&decrypted);
+                
+                let to_send_now = std::cmp::min(decrypted.len(), buf.remaining());
+                let (send_now, buffer_for_later) = decrypted.split_at(to_send_now);
+                buf.put_slice(send_now);
+                this.output_buffer.extend(buffer_for_later);
                 return std::task::Poll::Ready(Ok(()));
             }
 

@@ -24,7 +24,7 @@ pin_project_lite::pin_project! {
     /// inner writter. Under "normal" circunstances, the internal buffer will be seldom used.
     pub struct WriteHalf<T, U> {
         #[pin]
-        inner: T,
+        pub inner: T,
         encryptor: U,
         buffer: bytes::BytesMut,
         chunk_size: usize
@@ -70,6 +70,7 @@ where
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
 
         let len = (encrypted.len() as u32).to_le_bytes();
+        
         let mut buf = Vec::with_capacity(encrypted.len() + std::mem::size_of::<u32>());
         buf.extend_from_slice(&len);
         buf.append(&mut encrypted);
