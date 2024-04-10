@@ -8,6 +8,7 @@ use chacha20poly1305::{
 };
 
 use std::{
+    io::Write,
     ops::Sub,
     pin::Pin,
     task::{ready, Poll},
@@ -26,7 +27,8 @@ pin_project_lite::pin_project! {
         #[pin]
         pub inner: T,
         encryptor: U,
-        buffer: bytes::BytesMut,
+        encrypted_buffer: bytes::BytesMut,
+        unencrypted_buffer: Vec<u8>,
         chunk_size: usize
     }
 }
@@ -52,16 +54,13 @@ where
         Self {
             inner,
             encryptor,
-            buffer: BytesMut::with_capacity(size),
+            encrypted_buffer: BytesMut::with_capacity(size),
+            unencrypted_buffer: Vec::with_capacity(DEFAULT_CHUNK_SIZE),
             chunk_size,
         }
     }
 
-    /// Encrypts `buf` contents and return a [`Vec<u8>`] with 4 bytes in LE representing the encrypted content
-    /// length and the encrypted contents.
-    ///
-    /// [0, 0, 0, 0, ...]
-    ///
+    /// Encrypts `buf` contents and return a [`Vec<u8>`] representing the encrypted content.
     /// If the encryption fails, it returns [std::error::ErrorKind::InvalidInput]
     fn get_encrypted(&mut self, buf: &[u8]) -> std::io::Result<Vec<u8>> {
         let mut encrypted = self
@@ -69,13 +68,34 @@ where
             .encrypt_next(buf)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
 
-        let len = (encrypted.len() as u32).to_le_bytes();
-        
-        let mut buf = Vec::with_capacity(encrypted.len() + std::mem::size_of::<u32>());
-        buf.extend_from_slice(&len);
+        let mut buf = Vec::with_capacity(encrypted.len());
         buf.append(&mut encrypted);
 
         Ok(buf)
+    }
+
+    /// encrypts the internal unencrypted buffer if possible.
+    fn get_encrypted_from_internal_unencrypted_buffer(
+        &mut self,
+    ) -> Option<std::io::Result<Vec<u8>>> {
+        if self.unencrypted_buffer.len() < self.chunk_size {
+            None
+        } else {
+            let encryption_result = self
+                .encryptor
+                .encrypt_next(&self.unencrypted_buffer[..])
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err));
+
+            let mut encrypted = match encryption_result {
+                Ok(encrypted) => encrypted,
+                Err(e) => return Some(Err(e)),
+            };
+
+            let mut buf = Vec::with_capacity(encrypted.len());
+            buf.append(&mut encrypted);
+            self.unencrypted_buffer.clear();
+            Some(Ok(buf))
+        }
     }
 
     /// Flush the internal buffer into the inner writer. This functions does nothing if the
@@ -88,15 +108,15 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> Poll<std::io::Result<()>> {
         let mut me = self.project();
-        while me.buffer.has_remaining() {
-            match ready!(me.inner.as_mut().poll_write(cx, &me.buffer[..])) {
+        while me.encrypted_buffer.has_remaining() {
+            match ready!(me.inner.as_mut().poll_write(cx, &me.encrypted_buffer[..])) {
                 Ok(0) => {
                     return Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::WriteZero,
                         "failed to write the buffered data",
                     )));
                 }
-                Ok(n) => me.buffer.advance(n),
+                Ok(n) => me.encrypted_buffer.advance(n),
                 Err(e) => return Poll::Ready(Err(e)),
             }
         }
@@ -134,12 +154,42 @@ where
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<Result<usize, std::io::Error>> {
-        if !self.buffer.is_empty() {
+        if !self.encrypted_buffer.is_empty() {
             ready!(self.as_mut().flush_buf(cx))?
         }
 
-        let mut total_written = 0;
-        for chunk in buf.chunks(self.chunk_size) {
+        let taken: usize = if self.unencrypted_buffer.is_empty() {
+            0
+        } else {
+            let to_take = std::cmp::min(self.chunk_size - self.unencrypted_buffer.len(), buf.len());
+            self.unencrypted_buffer.extend_from_slice(&buf[..to_take]);
+
+            if self.unencrypted_buffer.len() == self.chunk_size {
+                let encrypted = self
+                    .get_encrypted_from_internal_unencrypted_buffer()
+                    .expect("We have checked that there is a chunk's worth of unencrypted data")?;
+                let me = self.as_mut().project();
+                match me.inner.poll_write(cx, &encrypted[..]) {
+                    Poll::Ready(Ok(written)) => {
+                        if written < encrypted.len() {
+                            self.encrypted_buffer.put(&encrypted[written..]);
+                            return Poll::Ready(Ok(to_take));
+                        }
+                    }
+                    Poll::Pending | Poll::Ready(Err(..)) => {
+                        self.encrypted_buffer.put(&encrypted[..]);
+                        return Poll::Ready(Ok(to_take));
+                    }
+                }
+            }
+            to_take
+        };
+
+        let buf = &buf[taken..];
+        let mut total_written = taken;
+
+        let mut chunks = buf.chunks_exact(self.chunk_size);
+        for chunk in &mut chunks {
             let encrypted = self.get_encrypted(chunk)?;
             total_written += chunk.len();
 
@@ -147,17 +197,23 @@ where
             match me.inner.poll_write(cx, &encrypted[..]) {
                 Poll::Ready(Ok(written)) => {
                     if written < encrypted.len() {
-                        self.buffer.put(&encrypted[written..]);
+                        self.encrypted_buffer.put(&encrypted[written..]);
                         return Poll::Ready(Ok(total_written));
                     }
                 }
                 Poll::Pending | Poll::Ready(Err(..)) => {
-                    self.buffer.put(&encrypted[..]);
+                    self.encrypted_buffer.put(&encrypted[..]);
                     return Poll::Ready(Ok(total_written));
                 }
             }
         }
-        Poll::Ready(Ok(buf.len()))
+
+        let leftover = chunks.remainder().len();
+        self.unencrypted_buffer
+            .extend_from_slice(chunks.remainder());
+        total_written += leftover;
+
+        Poll::Ready(Ok(total_written))
     }
 
     fn poll_flush(
