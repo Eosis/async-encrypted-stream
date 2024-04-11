@@ -8,7 +8,6 @@ use chacha20poly1305::{
 };
 
 use std::{
-    io::Write,
     ops::Sub,
     pin::Pin,
     task::{ready, Poll},
@@ -243,37 +242,33 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), std::io::Error>> {
-        dbg!("lkjasdlkjfase");
         // Put all possible in the encrypted buffer:
         if !self.unencrypted_buffer.is_empty() {
             match self.get_final_encrypted() {
                 Ok(buf) => {
-                    dbg!(self.encrypted_buffer.put(&buf[..]));
+                    self.encrypted_buffer.put(&buf[..]);
                 }
                 Err(err) => {
-                    return dbg!(Poll::Ready(Err(err)));
+                    return Poll::Ready(Err(err));
                 }
             }
         }
 
         while self.encrypted_buffer.has_remaining() {
-            dbg!("asdf");
             let mut me = self.as_mut().project();
             match me.inner.as_mut().poll_write(cx, &me.encrypted_buffer[..]) {
                 Poll::Ready(Ok(written)) => {
                     self.encrypted_buffer.advance(written);
-                    
+
                     if written < self.encrypted_buffer.len() {
-                        return dbg!(Poll::Pending);
+                        return Poll::Pending;
                     }
                 }
                 Poll::Pending => {
-                    dbg!("asdf2");
-                    return dbg!(Poll::Pending);
+                    return Poll::Pending;
                 }
                 Poll::Ready(Err(e)) => {
-                    dbg!("asdf3");
-                    return dbg!(Poll::Ready(Err(e)));
+                    return Poll::Ready(Err(e));
                 }
             }
         }
@@ -314,15 +309,13 @@ mod tests {
                     start_nonce.as_ref().into(),
                 ),
             );
-            dbg!(writer.inner.buffer());
             assert_eq!(
                 writer.write(b"some content").await.unwrap(),
                 "some content".bytes().len()
             );
             writer.shutdown().await.unwrap();
         }
-        
-        dbg!(&buffer);
+
         assert_eq!(expected, buffer)
     }
 }

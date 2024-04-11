@@ -148,13 +148,12 @@ fn get_key<const S: usize>(plain_key: &str, salt: &str) -> [u8; S] {
 
 #[cfg(test)]
 mod tests {
-    use std::{assert_eq, fmt::write, time::Duration};
+    use std::assert_eq;
 
     use chacha20poly1305::{
         aead::stream::{DecryptorLE31, EncryptorLE31},
         XChaCha20Poly1305,
     };
-    use futures::stream::StreamExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -186,7 +185,7 @@ mod tests {
             let content = content.clone();
             tokio::spawn(async move {
                 let _ = writer.write_all(&content).await;
-                writer.shutdown().await;
+                writer.shutdown().await.unwrap();
             })
         };
         let total_read = read_task.await.unwrap();
