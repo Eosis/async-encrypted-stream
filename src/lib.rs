@@ -134,12 +134,8 @@ where
     NonceSize<A, S>: ArrayLength<u8>,
 {
     let decryptor = Decryptor::new(key, nonce);
-    (
-        write,
-        ReadHalf::with_capacity(read, decryptor, buffer_size)
-    )   
+    (write, ReadHalf::with_capacity(read, decryptor, buffer_size))
 }
-
 
 #[cfg(test)]
 fn get_key<const S: usize>(plain_key: &str, salt: &str) -> [u8; S] {
@@ -155,8 +151,8 @@ mod tests {
         aead::stream::{DecryptorLE31, EncryptorLE31},
         XChaCha20Poly1305,
     };
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use futures::stream::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
     const MB: usize = 1024 * 1024;
@@ -177,13 +173,13 @@ mod tests {
                 if bytes_read == 0 {
                     break;
                 }
-                assert!(read_buf.iter().all(|b| *b== 100));
+                assert!(read_buf.iter().all(|b| *b == 100));
                 total_read += bytes_read;
             }
             total_read
         });
 
-        let write_task = { 
+        let write_task = {
             let content = content.clone();
             tokio::spawn(async move {
                 let _ = writer.write_all(&content).await;

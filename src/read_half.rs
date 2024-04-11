@@ -143,13 +143,12 @@ where
                 let to_take = std::cmp::min(this.output_buffer.len(), buf.remaining());
                 let drain = this.output_buffer.drain(0..to_take);
                 buf.put_slice(drain.as_slice());
-                
+
                 // Return Early if the buf was populated from our output buffer.
-                return std::task::Poll::Ready(Ok(())); 
+                return std::task::Poll::Ready(Ok(()));
             }
 
             if let Some(decrypted) = self.as_mut().produce()? {
-                
                 let remaining_output_buffer_capacity = {
                     let this = self.as_ref();
                     this.output_buffer.capacity()
@@ -162,7 +161,7 @@ where
                         "Decrypted value exceeds buffer capacity",
                     ))?;
                 }
-                
+
                 let to_send_now = std::cmp::min(decrypted.len(), buf.remaining());
                 let (send_now, buffer_for_later) = decrypted.split_at(to_send_now);
                 buf.put_slice(send_now);

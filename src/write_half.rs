@@ -98,6 +98,18 @@ where
         }
     }
 
+    fn get_final_encrypted(&mut self) -> std::io::Result<Vec<u8>> {
+        let mut encrypted = self
+            .encryptor
+            .encrypt_next(&self.unencrypted_buffer[..])
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+        let mut buf = Vec::with_capacity(encrypted.len());
+        buf.append(&mut encrypted);
+        self.unencrypted_buffer.clear();
+        Ok(buf)
+    }
+
     /// Flush the internal buffer into the inner writer. This functions does nothing if the
     /// internal buffer is empty.   
     ///
@@ -167,8 +179,11 @@ where
             if self.unencrypted_buffer.len() == self.chunk_size {
                 let encrypted = self
                     .get_encrypted_from_internal_unencrypted_buffer()
-                    .expect("We have checked that there is a chunk's worth of unencrypted data")?;
+                    .expect(
+                        "We have just checked that there is a chunk's worth of unencrypted data",
+                    )?;
                 let me = self.as_mut().project();
+                // TODO: Refactor with below
                 match me.inner.poll_write(cx, &encrypted[..]) {
                     Poll::Ready(Ok(written)) => {
                         if written < encrypted.len() {
@@ -225,9 +240,41 @@ where
     }
 
     fn poll_shutdown(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), std::io::Error>> {
+        // Put all possible in the encrypted buffer:
+        if !self.unencrypted_buffer.is_empty() {
+            match self.get_final_encrypted() {
+                Ok(buf) => {
+                    self.encrypted_buffer.put(&buf[..]);
+                }
+                Err(err) => {
+                    return Poll::Ready(Err(err));
+                }
+            }
+        }
+
+        while self.encrypted_buffer.has_remaining() {
+            let me = self.as_mut().project();
+            // TODO Fix this random clone:
+            let temp = me.encrypted_buffer.clone();
+            match me.inner.poll_write(cx, &temp[..]) {
+                Poll::Ready(Ok(written)) => {
+                    if written < self.encrypted_buffer.len() {
+                        self.encrypted_buffer.advance(written);
+                        return Poll::Pending;
+                    }
+                }
+                Poll::Pending => {
+                    return Poll::Pending;
+                }
+                Poll::Ready(Err(e)) => {
+                    return Poll::Ready(Err(e));
+                }
+            }
+        }
+
         self.project().inner.poll_shutdown(cx)
     }
 }
