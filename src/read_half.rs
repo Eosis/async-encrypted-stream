@@ -69,11 +69,13 @@ where
 
         if *me.ending && *me.cap < *me.pos + message_size {
             let me = self.as_mut().project();
-            let decrypted = me
+            let decrypted = dbg!(me
                 .decryptor
-                .decrypt_next(&me.buffer[..])
-                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-            return Ok(Some(decrypted));
+                .decrypt_next(&me.buffer[*me.pos..*me.cap])
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err)))?;
+            *me.pos = 0;
+            *me.cap = 0;
+            return dbg!(Ok(Some(decrypted)));
         }
 
         // If there is a chunk's worth of bytes in the buffer, read the bytes and decrypt the message.
@@ -82,7 +84,7 @@ where
         //
         // If there isn't enough bytes to produce a message, just return None
 
-        if *me.cap >= *me.pos + message_size {
+        if dbg!(*me.cap >= *me.pos + message_size) {
             // There is a chunk in the buffer.
             let decrypted = me
                 .decryptor
@@ -90,6 +92,7 @@ where
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
             *me.pos += message_size;
+            
             if *me.pos == *me.cap {
                 *me.pos = 0;
                 *me.cap = 0;
@@ -120,7 +123,7 @@ where
         }
 
         if *me.pos + desired_additional > me.buffer.len() {
-            me.buffer.resize(me.buffer.len() * 2, 0);
+            dbg!(me.buffer.resize(me.buffer.len() * 2, 0));
         }
     }
 
@@ -152,22 +155,17 @@ where
         loop {
             if !self.output_buffer.is_empty() && buf.remaining() > 0 {
                 let this = self.as_mut().project();
-                let to_take = std::cmp::min(this.output_buffer.len(), buf.remaining());
+                let to_take = std::cmp::min(this.output_buffer.len(), dbg!(buf.remaining()));
                 let drain = this.output_buffer.drain(0..to_take);
-                buf.put_slice(drain.as_slice());
+                dbg!(buf.put_slice(drain.as_slice()));
 
                 // Return Early if the buf was populated from our output buffer.
                 return std::task::Poll::Ready(Ok(()));
             }
 
             if let Some(decrypted) = self.as_mut().produce()? {
-                let remaining_output_buffer_capacity = {
-                    let this = self.as_ref();
-                    this.output_buffer.capacity()
-                };
-
                 let this = self.as_mut().project();
-                if decrypted.len() > buf.remaining() + remaining_output_buffer_capacity {
+                if dbg!(decrypted.len()) > buf.remaining() + this.output_buffer.capacity() {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::OutOfMemory,
                         "Decrypted value exceeds buffer capacity",
@@ -178,11 +176,13 @@ where
                 let (send_now, buffer_for_later) = decrypted.split_at(to_send_now);
                 buf.put_slice(send_now);
                 this.output_buffer.extend(buffer_for_later);
-                return std::task::Poll::Ready(Ok(()));
+                return dbg!(std::task::Poll::Ready(Ok(())));
             }
 
-            if ready!(self.as_mut().poll_fill_buf(cx))?.is_empty() {
-                return std::task::Poll::Ready(Ok(()));
+            if ready!(dbg!(self.as_mut().poll_fill_buf(cx)))?.is_empty() {
+                // This will only happen at EOF, so produce the last value immediately.
+                println!("I think this will only happen once, at EOF");
+                return dbg!(std::task::Poll::Ready(Ok(())));
             }
         }
     }
@@ -200,14 +200,18 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<&[u8]>> {
         let me = self.project();
+        if *me.ending {
+            // We have already hit EOF for this stream, so just return an empty slice
+            return std::task::Poll::Ready(Ok(&me.buffer[0..0]))
+        }
 
         let mut buf = tokio::io::ReadBuf::new(&mut me.buffer[*me.cap..]);
         ready!(me.inner.poll_read(cx, &mut buf))?;
 
         if buf.filled().is_empty() {
-            *me.ending = true;
+            *me.ending = dbg!(true);
         } else {
-            *me.cap += buf.filled().len();
+            *me.cap += dbg!(buf.filled().len());
         }
 
         std::task::Poll::Ready(Ok(&me.buffer[*me.pos..*me.cap]))
@@ -241,30 +245,27 @@ mod tests {
 
         let (rx, mut tx) = tokio::io::duplex(100);
 
-        tokio::spawn(async move {
-            let encrypted_content = {
-                let mut encryptor: EncryptorLE31<XChaCha20Poly1305> =
-                    chacha20poly1305::aead::stream::EncryptorLE31::from_aead(
-                        XChaCha20Poly1305::new(key.as_ref().into()),
-                        start_nonce.as_ref().into(),
-                    );
+        let parts = ["some content", "some other content", "even more content"];
+        let combined: String = parts.join("");
+        {
+            let combined = combined.clone();
+            tokio::spawn(async move {
+                let encrypted_content = {
+                    let mut encryptor: EncryptorLE31<XChaCha20Poly1305> =
+                        chacha20poly1305::aead::stream::EncryptorLE31::from_aead(
+                            XChaCha20Poly1305::new(key.as_ref().into()),
+                            start_nonce.as_ref().into(),
+                        );
 
-                let mut expected = Vec::new();
-
-                for data in ["some content", "some other content", "even more content"] {
-                    let mut encrypted = encryptor.encrypt_next(data.as_bytes()).unwrap();
-                    expected.extend((encrypted.len() as u32).to_le_bytes());
-                    expected.append(&mut encrypted);
+                    encryptor.encrypt_next(combined.clone().as_bytes()).unwrap()
+                };
+                dbg!(&encrypted_content);
+                for chunk in encrypted_content.chunks(10) {
+                    let _ = tx.write(chunk).await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
                 }
-
-                expected
-            };
-
-            for chunk in encrypted_content.chunks(10) {
-                let _ = tx.write(chunk).await;
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        });
+            });
+        }
 
         tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -276,10 +277,11 @@ mod tests {
 
         let mut plain_content = String::new();
         let _ = reader.read_to_string(&mut plain_content).await;
+        dbg!(&reader.buffer[0..68]);
 
         assert_eq!(
             plain_content,
-            "some contentsome other contenteven more content"
+            combined
         );
     }
 
@@ -288,21 +290,18 @@ mod tests {
         let key: [u8; 32] = get_key("key", "group");
         let start_nonce = [0u8; 20];
 
-        let (rx, _tx) = tokio::io::duplex(100);
-
+        let (rx, mut tx) = tokio::io::duplex(100);
+        { 
+            tx.write_all(&vec![0; 20]).await;
+            drop(tx); // Drop the transmit so we correctly identify EOF.
+        }
         let decryptor = chacha20poly1305::aead::stream::DecryptorLE31::from_aead(
             XChaCha20Poly1305::new(key.as_ref().into()),
             start_nonce.as_ref().into(),
         );
         let mut reader = ReadHalf::new(rx, decryptor);
-        let mut reader_data = Vec::from_iter(10u32.to_le_bytes());
-        reader_data.extend_from_slice(&[0u8; 20]);
-
-        reader.cap = reader_data.len();
-        reader.buffer = reader_data;
 
         let mut buf = [0u8; 1024];
-
         assert!(reader.read(&mut buf).await.is_err());
         assert!(reader.read(&mut buf).await.is_err());
     }

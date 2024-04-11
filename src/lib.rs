@@ -186,6 +186,7 @@ mod tests {
             let content = content.clone();
             tokio::spawn(async move {
                 let _ = writer.write_all(&content).await;
+                writer.shutdown().await;
             })
         };
         let total_read = read_task.await.unwrap();
