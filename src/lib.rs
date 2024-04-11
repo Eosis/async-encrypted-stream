@@ -94,7 +94,7 @@ where
     let decryptor = Decryptor::new(key, nonce);
 
     (
-        ReadHalf::with_capacity(read, decryptor, buffer_size),
+        ReadHalf::with_capacity(read, decryptor, buffer_size, chunk_size),
         WriteHalf::with_capacity(write, encryptor, buffer_size, chunk_size),
     )
 }
@@ -134,7 +134,10 @@ where
     NonceSize<A, S>: ArrayLength<u8>,
 {
     let decryptor = Decryptor::new(key, nonce);
-    (write, ReadHalf::with_capacity(read, decryptor, buffer_size))
+    (
+        write,
+        ReadHalf::with_capacity(read, decryptor, buffer_size, DEFAULT_CHUNK_SIZE),
+    )
 }
 
 #[cfg(test)]

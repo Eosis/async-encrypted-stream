@@ -22,7 +22,9 @@ pin_project! {
         buffer: Vec<u8>,
         pos: usize,
         cap: usize,
-        output_buffer: Vec<u8>
+        output_buffer: Vec<u8>,
+        chunk_size: usize,
+        ending: bool,
     }
 }
 
@@ -34,16 +36,23 @@ where
     NonceSize<A, S>: ArrayLength<u8>,
 {
     pub fn new(inner: T, decryptor: Decryptor<A, S>) -> Self {
-        Self::with_capacity(inner, decryptor, DEFAULT_BUFFER_SIZE)
+        Self::with_capacity(inner, decryptor, DEFAULT_BUFFER_SIZE, DEFAULT_CHUNK_SIZE)
     }
-    pub fn with_capacity(inner: T, decryptor: Decryptor<A, S>, size: usize) -> Self {
+    pub fn with_capacity(
+        inner: T,
+        decryptor: Decryptor<A, S>,
+        size: usize,
+        chunk_size: usize,
+    ) -> Self {
         Self {
             inner,
             decryptor,
             buffer: vec![0u8; size],
             pos: 0,
             cap: 0,
-            output_buffer: Vec::with_capacity(DEFAULT_CHUNK_SIZE),
+            output_buffer: Vec::with_capacity(chunk_size),
+            chunk_size,
+            ending: false,
         }
     }
 
@@ -55,26 +64,32 @@ where
             return Ok(None);
         }
 
-        // Producing a value is a relatively simple operation.
-        // Read 4 bytes from the buffer and cast to a u32 as the length of the message.
-        // If there is enough bytes in the buffer, read the bytes and decrypt the message.
+        let message_size = self.chunk_size + 16;
+        let me = self.as_mut().project();
+
+        if *me.ending && *me.cap < *me.pos + message_size {
+            let me = self.as_mut().project();
+            let decrypted = me
+                .decryptor
+                .decrypt_next(&me.buffer[..])
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+            return Ok(Some(decrypted));
+        }
+
+        // If there is a chunk's worth of bytes in the buffer, read the bytes and decrypt the message.
         //
-        // Then advance the buffer to the next position (4 + length)
+        // Then advance the buffer by a chunk_size
         //
         // If there isn't enough bytes to produce a message, just return None
 
-        let mut length_bytes = [0u8; 4];
-        length_bytes.copy_from_slice(&self.buffer[self.pos..self.pos + 4]);
-        let length = u32::from_le_bytes(length_bytes) as usize;
-
-        let me = self.as_mut().project();
-        if *me.cap >= *me.pos + length + 4 {
+        if *me.cap >= *me.pos + message_size {
+            // There is a chunk in the buffer.
             let decrypted = me
                 .decryptor
-                .decrypt_next(&me.buffer[*me.pos + 4..*me.pos + 4 + length])
+                .decrypt_next(&me.buffer[*me.pos..*me.pos + message_size])
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
-            *me.pos += 4 + length;
+            *me.pos += message_size;
             if *me.pos == *me.cap {
                 *me.pos = 0;
                 *me.cap = 0;
@@ -82,7 +97,7 @@ where
 
             Ok(Some(decrypted))
         } else {
-            self.adjust_buffer(length + 4);
+            self.adjust_buffer(message_size);
             Ok(None)
         }
     }
@@ -111,9 +126,6 @@ where
 
     /// Return the contents of the internal buffer at the current position, for diagnostic
     /// purposes.
-    ///
-    /// For each message available in the buffer, the first 4 bytes are the message length encoded
-    /// as a **little endian** u32. The end of the buffer may contain incomplete data.
     pub fn buffer(&self) -> &[u8] {
         &self.buffer[self.pos..]
     }
@@ -191,7 +203,10 @@ where
 
         let mut buf = tokio::io::ReadBuf::new(&mut me.buffer[*me.cap..]);
         ready!(me.inner.poll_read(cx, &mut buf))?;
-        if !buf.filled().is_empty() {
+
+        if buf.filled().is_empty() {
+            *me.ending = true;
+        } else {
             *me.cap += buf.filled().len();
         }
 
